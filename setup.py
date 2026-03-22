@@ -49,7 +49,7 @@ long_description = (Path(__file__).parent / "README.md").read_text()
 
 setup(
     name='roboflex.transport.zenoh',
-    version='0.1.2',
+    version='0.1.3',
     description='Roboflex Transport Zenoh Library',
     author='Colin Prepscius',
     author_email='colinprepscius@gmail.com',
