@@ -77,4 +77,54 @@ PYBIND11_MODULE(roboflex_transport_zenoh_ext, m) {
         .def_property_readonly("max_queued_msgs", &ZenohSubscriber::get_max_queued_msgs)
         .def_property_readonly("wait_timeout_milliseconds", &ZenohSubscriber::get_wait_timeout_milliseconds)
     ;
+
+    py::class_<ZenohRequestClient, core::Node, std::shared_ptr<ZenohRequestClient>>(m, "ZenohRequestClient")
+        .def(py::init<ZenohSessionPtr,
+                      const std::string&,
+                      const std::string&,
+                      uint64_t,
+                      z_query_target_t,
+                      bool,
+                      z_priority_t,
+                      zc_locality_t>(),
+            "Creates a Zenoh request client using query/reply.",
+            py::arg("session"),
+            py::arg("key_expression"),
+            py::arg("name") = "ZenohRequestClient",
+            py::arg("timeout_milliseconds") = 1000,
+            py::arg("target") = Z_QUERY_TARGET_BEST_MATCHING,
+            py::arg("express") = false,
+            py::arg("priority") = Z_PRIORITY_DEFAULT,
+            py::arg("allowed_destination") = zc_locality_default())
+        .def("call", &ZenohRequestClient::call,
+            py::arg("message"),
+            py::arg("timeout_milliseconds") = -1)
+        .def("call", [](std::shared_ptr<ZenohRequestClient> a, py::object m, int timeout_milliseconds) {
+            return a->call(dynoflex_from_object(m), timeout_milliseconds);
+        },
+            py::arg("message"),
+            py::arg("timeout_milliseconds") = -1)
+        .def_property_readonly("key_expression", &ZenohRequestClient::get_key_expression)
+        .def_property_readonly("timeout_milliseconds", &ZenohRequestClient::get_timeout_milliseconds)
+    ;
+
+    py::class_<ZenohRequestServer, core::Node, std::shared_ptr<ZenohRequestServer>>(m, "ZenohRequestServer")
+        .def(py::init<ZenohSessionPtr,
+                      const std::string&,
+                      const std::string&,
+                      ZenohRequestServer::RequestHandler,
+                      zc_locality_t,
+                      bool>(),
+            "Creates a Zenoh request server using queryables.",
+            py::arg("session"),
+            py::arg("key_expression"),
+            py::arg("name") = "ZenohRequestServer",
+            py::arg("request_handler") = nullptr,
+            py::arg("allowed_origin") = zc_locality_default(),
+            py::arg("complete") = true)
+        .def("start", &ZenohRequestServer::start)
+        .def("stop", &ZenohRequestServer::stop)
+        .def("set_handler", &ZenohRequestServer::set_handler)
+        .def_property_readonly("key_expression", &ZenohRequestServer::get_key_expression)
+    ;
 }

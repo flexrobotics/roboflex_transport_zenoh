@@ -27,6 +27,35 @@ std::string json_array_from_strings(const std::vector<std::string>& entries) {
     return out;
 }
 
+z_owned_bytes_t bytes_from_message(core::MessagePtr m) {
+    auto payload_copy = new uint8_t[m->get_raw_size()];
+    std::memcpy(payload_copy, m->get_raw_data(), m->get_raw_size());
+
+    z_owned_bytes_t bytes{};
+    if (z_bytes_from_buf(&bytes, payload_copy, m->get_raw_size(), [](void* data, void*) {
+        delete[] static_cast<uint8_t*>(data);
+    }, nullptr) < 0) {
+        delete[] payload_copy;
+        throw std::runtime_error("failed to wrap roboflex message bytes for zenoh");
+    }
+    return bytes;
+}
+
+core::MessagePtr message_from_bytes(const z_loaned_bytes_t* payload_bytes) {
+    if (payload_bytes == nullptr) {
+        return nullptr;
+    }
+
+    size_t len = z_bytes_len(payload_bytes);
+    std::vector<uint8_t> bytes(len);
+
+    auto reader = z_bytes_get_reader(payload_bytes);
+    z_bytes_reader_read(&reader, bytes.data(), len);
+
+    auto payload = std::make_shared<core::MessageBackingStoreVector>(std::move(bytes));
+    return std::make_shared<core::Message>(payload);
+}
+
 } // namespace
 
 
@@ -167,17 +196,7 @@ void ZenohPublisher::receive(core::MessagePtr m)
         return;
     }
 
-    auto payload_copy = new uint8_t[m->get_raw_size()];
-    std::memcpy(payload_copy, m->get_raw_data(), m->get_raw_size());
-
-    z_owned_bytes_t bytes{};
-    if (z_bytes_from_buf(&bytes, payload_copy, m->get_raw_size(), [](void* data, void*) {
-        delete[] static_cast<uint8_t*>(data);
-    }, nullptr) < 0) {
-        delete[] payload_copy;
-        std::cout << "ZenohPublisher failed to wrap payload bytes" << std::endl;
-        return;
-    }
+    z_owned_bytes_t bytes = bytes_from_message(m);
 
     z_publisher_put_options_t opts{};
     z_publisher_put_options_default(&opts);
@@ -227,16 +246,7 @@ void ZenohSubscriber::subscription_callback(z_loaned_sample_t* sample, void* arg
 
     ZenohSubscriber* self = static_cast<ZenohSubscriber*>(arg);
 
-    const z_loaned_bytes_t* payload_bytes = z_sample_payload(sample);
-    size_t len = z_bytes_len(payload_bytes);
-    std::vector<uint8_t> bytes(len);
-
-    auto reader = z_bytes_get_reader(payload_bytes);
-    z_bytes_reader_read(&reader, bytes.data(), len);
-
-    auto payload = std::make_shared<core::MessageBackingStoreVector>(std::move(bytes));
-
-    auto msg = std::make_shared<core::Message>(payload);
+    auto msg = message_from_bytes(z_sample_payload(sample));
 
     {
         std::unique_lock lock(self->queue_mutex);
@@ -321,6 +331,206 @@ void ZenohSubscriber::child_thread_fn()
     }
 
     destroy_subscriber();
+}
+
+
+// -- ZenohRequestClient --
+
+ZenohRequestClient::ZenohRequestClient(
+    ZenohSessionPtr session,
+    const string& key_expression,
+    const string& name,
+    uint64_t timeout_milliseconds,
+    z_query_target_t target,
+    bool express,
+    z_priority_t priority,
+    zc_locality_t allowed_destination):
+        core::Node(name),
+        session(session),
+        key_expression(key_expression),
+        default_timeout_milliseconds(timeout_milliseconds),
+        target(target),
+        express(express),
+        priority(priority),
+        allowed_destination(allowed_destination),
+        keyexpr_constructed(false)
+{
+}
+
+ZenohRequestClient::~ZenohRequestClient()
+{
+    destroy_keyexpr();
+}
+
+void ZenohRequestClient::ensure_keyexpr()
+{
+    if (!keyexpr_constructed) {
+        if (z_keyexpr_from_str(&keyexpr, key_expression.c_str()) < 0) {
+            throw std::runtime_error("ZenohRequestClient failed to parse key expression " + key_expression);
+        }
+        keyexpr_constructed = true;
+    }
+}
+
+void ZenohRequestClient::destroy_keyexpr()
+{
+    if (keyexpr_constructed) {
+        z_drop(z_move(keyexpr));
+        keyexpr_constructed = false;
+    }
+}
+
+core::MessagePtr ZenohRequestClient::call(core::MessagePtr m, int timeout_milliseconds)
+{
+    if (m == nullptr) {
+        return nullptr;
+    }
+
+    ensure_keyexpr();
+
+    z_owned_fifo_handler_reply_t handler{};
+    z_owned_closure_reply_t closure{};
+    z_fifo_channel_reply_new(&closure, &handler, 16);
+
+    z_get_options_t opts{};
+    z_get_options_default(&opts);
+    opts.target = target;
+    opts.timeout_ms = timeout_milliseconds < 0
+        ? default_timeout_milliseconds
+        : (uint64_t) timeout_milliseconds;
+    opts.is_express = express;
+    opts.priority = priority;
+    opts.allowed_destination = allowed_destination;
+
+    z_owned_bytes_t payload = bytes_from_message(m);
+    opts.payload = z_move(payload);
+
+    if (z_get(session->loaned_session(), z_loan(keyexpr), "", z_move(closure), &opts) < 0) {
+        z_drop(z_move(handler));
+        return nullptr;
+    }
+
+    z_owned_reply_t reply{};
+    core::MessagePtr result = nullptr;
+    while (z_fifo_handler_reply_recv(z_loan(handler), &reply) == Z_OK) {
+        if (z_reply_is_ok(z_loan(reply))) {
+            const z_loaned_sample_t* sample = z_reply_ok(z_loan(reply));
+            result = message_from_bytes(z_sample_payload(sample));
+            z_drop(z_move(reply));
+            break;
+        }
+        z_drop(z_move(reply));
+    }
+
+    z_drop(z_move(handler));
+    return result;
+}
+
+void ZenohRequestClient::receive(core::MessagePtr m)
+{
+    auto response = call(m);
+    if (response != nullptr) {
+        signal(response);
+    }
+}
+
+
+// -- ZenohRequestServer --
+
+ZenohRequestServer::ZenohRequestServer(
+    ZenohSessionPtr session,
+    const string& key_expression,
+    const string& name,
+    RequestHandler request_handler,
+    zc_locality_t allowed_origin,
+    bool complete):
+        core::Node(name),
+        session(session),
+        key_expression(key_expression),
+        request_handler(request_handler),
+        allowed_origin(allowed_origin),
+        complete(complete),
+        queryable_constructed(false)
+{
+}
+
+ZenohRequestServer::~ZenohRequestServer()
+{
+    destroy_queryable();
+}
+
+void ZenohRequestServer::start()
+{
+    ensure_queryable();
+}
+
+void ZenohRequestServer::stop()
+{
+    destroy_queryable();
+}
+
+void ZenohRequestServer::ensure_queryable()
+{
+    if (!queryable_constructed) {
+        if (z_keyexpr_from_str(&keyexpr, key_expression.c_str()) < 0) {
+            throw std::runtime_error("ZenohRequestServer failed to parse key expression " + key_expression);
+        }
+
+        z_owned_closure_query_t closure{};
+        z_closure_query(&closure, query_callback, nullptr, this);
+
+        z_queryable_options_t opts{};
+        z_queryable_options_default(&opts);
+        opts.allowed_origin = allowed_origin;
+        opts.complete = complete;
+
+        if (z_declare_queryable(
+                session->loaned_session(),
+                &queryable,
+                z_loan(keyexpr),
+                z_move(closure),
+                &opts) < 0) {
+            z_drop(z_move(keyexpr));
+            throw std::runtime_error("ZenohRequestServer failed to declare queryable for " + key_expression);
+        }
+
+        queryable_constructed = true;
+    }
+}
+
+void ZenohRequestServer::destroy_queryable()
+{
+    if (queryable_constructed) {
+        z_undeclare_queryable(z_move(queryable));
+        z_drop(z_move(keyexpr));
+        queryable_constructed = false;
+    }
+}
+
+void ZenohRequestServer::query_callback(z_loaned_query_t* query, void* arg)
+{
+    if (query == nullptr || arg == nullptr) {
+        return;
+    }
+
+    auto* self = static_cast<ZenohRequestServer*>(arg);
+    auto request = message_from_bytes(z_query_payload(query));
+
+    core::MessagePtr response = nullptr;
+    if (request != nullptr) {
+        response = self->request_handler
+            ? self->request_handler(request)
+            : self->handle_rpc(request);
+    }
+
+    if (response == nullptr) {
+        response = std::make_shared<core::BlankMessage>("no_response");
+    }
+
+    z_owned_bytes_t payload = bytes_from_message(response);
+    z_query_reply_options_t opts{};
+    z_query_reply_options_default(&opts);
+    z_query_reply(query, z_query_keyexpr(query), z_move(payload), &opts);
 }
 
 } // namespace transportzenoh

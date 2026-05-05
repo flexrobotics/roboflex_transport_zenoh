@@ -28,7 +28,9 @@ class CMakeBuild(build_ext):
             extdir += os.path.sep
 
         cmake_args = ['-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=' + extdir,
-                      '-DPython_EXECUTABLE=' + sys.executable]
+                      '-DPython_EXECUTABLE=' + sys.executable,
+                      '-DBUILD_ROBOFLEX_TRANSPORT_ZENOH_PYTHON_EXT=ON',
+                      '-DBUILD_TESTING=OFF']
 
         cfg = 'Debug' if self.debug else 'Release'
         build_args = ['--config', cfg]
@@ -49,7 +51,7 @@ long_description = (Path(__file__).parent / "README.md").read_text()
 
 setup(
     name='roboflex.transport.zenoh',
-    version='0.1.3',
+    version='0.1.4',
     description='Roboflex Transport Zenoh Library',
     author='Colin Prepscius',
     author_email='colinprepscius@gmail.com',

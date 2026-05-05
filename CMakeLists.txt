@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.18)
 
 project(roboflex_transport_zenoh)
 
+option(BUILD_ROBOFLEX_TRANSPORT_ZENOH_PYTHON_EXT "Build roboflex_transport_zenoh Python bindings" OFF)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
@@ -26,6 +28,15 @@ FetchContent_Declare(zenohc
 )
 set(ZENOHC_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(ZENOHC_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(_zenohc_cargo_flags ${ZENOHC_CARGO_FLAGS})
+    list(FILTER _zenohc_cargo_flags EXCLUDE REGEX "env\\.MACOSX_DEPLOYMENT_TARGET=")
+    list(APPEND _zenohc_cargo_flags "--config=env.MACOSX_DEPLOYMENT_TARGET=\"${CMAKE_OSX_DEPLOYMENT_TARGET}\"")
+    set(ZENOHC_CARGO_FLAGS
+        ${_zenohc_cargo_flags}
+        CACHE STRING "Additional cargo flags" FORCE)
+    unset(_zenohc_cargo_flags)
+endif()
 FetchContent_MakeAvailable(zenohc)
 
 set(ZENOH_TARGET zenohc)
@@ -73,15 +84,28 @@ endif()
 
 add_executable(pub_sub_0_zenoh_cpp examples/pub_sub_0_cpp.cpp)
 target_link_libraries(pub_sub_0_zenoh_cpp PRIVATE
-    roboflex_core
     roboflex_transport_zenoh
 )
 
 add_executable(pub_sub_config_zenoh_cpp examples/pub_sub_config_cpp.cpp)
 target_link_libraries(pub_sub_config_zenoh_cpp PRIVATE
-    roboflex_core
     roboflex_transport_zenoh
 )
+
+
+# --------------------
+# Tests
+
+include(CTest)
+
+if(BUILD_TESTING)
+    add_executable(test_zenoh_transport tests/test_zenoh_transport.cpp)
+    target_link_libraries(test_zenoh_transport PRIVATE
+        roboflex_transport_zenoh
+    )
+    add_test(NAME test_zenoh_transport COMMAND test_zenoh_transport)
+    set_tests_properties(test_zenoh_transport PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 
 
 # --------------------
@@ -125,4 +149,6 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/roboflex_transport_zenohConfig.cmake
 # --------------------
 # build python bindings
 
-add_subdirectory(python)
+if(BUILD_ROBOFLEX_TRANSPORT_ZENOH_PYTHON_EXT)
+    add_subdirectory(python)
+endif()

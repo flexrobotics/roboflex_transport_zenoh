@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -161,6 +162,98 @@ protected:
 };
 
 using ZenohSubscriberPtr = shared_ptr<ZenohSubscriber>;
+
+
+/**
+ * A synchronous request client using zenoh query/reply.
+ *
+ * call() sends the roboflex message as the query payload and returns the first
+ * successful reply payload as a roboflex message. Zenoh handles routing and
+ * timeout semantics; this class only adapts roboflex Message bytes to that API.
+ */
+class ZenohRequestClient: public core::Node {
+public:
+    ZenohRequestClient(
+        ZenohSessionPtr session,
+        const string& key_expression,
+        const string& name = "ZenohRequestClient",
+        uint64_t timeout_milliseconds = 1000,
+        z_query_target_t target = Z_QUERY_TARGET_BEST_MATCHING,
+        bool express = false,
+        z_priority_t priority = Z_PRIORITY_DEFAULT,
+        zc_locality_t allowed_destination = zc_locality_default());
+
+    ~ZenohRequestClient();
+
+    core::MessagePtr call(core::MessagePtr m, int timeout_milliseconds = -1);
+    void receive(core::MessagePtr m) override;
+
+    const string& get_key_expression() const { return key_expression; }
+    uint64_t get_timeout_milliseconds() const { return default_timeout_milliseconds; }
+
+protected:
+    void ensure_keyexpr();
+    void destroy_keyexpr();
+
+    ZenohSessionPtr session;
+    string key_expression;
+    uint64_t default_timeout_milliseconds;
+    z_query_target_t target;
+    bool express;
+    z_priority_t priority;
+    zc_locality_t allowed_destination;
+    bool keyexpr_constructed;
+    z_owned_keyexpr_t keyexpr;
+};
+
+using ZenohRequestClientPtr = shared_ptr<ZenohRequestClient>;
+
+
+/**
+ * A request server using zenoh queryables.
+ *
+ * The server declares a queryable on key_expression. Incoming query payloads
+ * are decoded as roboflex messages; the handler return value is sent as the
+ * query reply. If no handler is installed, handle_rpc(request) is used.
+ */
+class ZenohRequestServer: public core::Node {
+public:
+    using RequestHandler = std::function<core::MessagePtr(core::MessagePtr)>;
+
+    ZenohRequestServer(
+        ZenohSessionPtr session,
+        const string& key_expression,
+        const string& name = "ZenohRequestServer",
+        RequestHandler request_handler = nullptr,
+        zc_locality_t allowed_origin = zc_locality_default(),
+        bool complete = true);
+
+    ~ZenohRequestServer();
+
+    void start();
+    void stop();
+    void set_handler(RequestHandler request_handler) { this->request_handler = request_handler; }
+
+    const string& get_key_expression() const { return key_expression; }
+
+protected:
+    void ensure_queryable();
+    void destroy_queryable();
+
+    static void query_callback(z_loaned_query_t* query, void* arg);
+
+    ZenohSessionPtr session;
+    string key_expression;
+    RequestHandler request_handler;
+    zc_locality_t allowed_origin;
+    bool complete;
+
+    bool queryable_constructed;
+    z_owned_queryable_t queryable;
+    z_owned_keyexpr_t keyexpr;
+};
+
+using ZenohRequestServerPtr = shared_ptr<ZenohRequestServer>;
 
 } // namespace transportzenoh
 } // namespace roboflex
